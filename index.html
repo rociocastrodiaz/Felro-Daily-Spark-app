@@ -1355,14 +1355,63 @@ async function saveRemoteProfile(){
   }
 }
 
+/* ======================= TASKS SYNC — Paso 5.1 (solo lectura) =======================
+   Piloto: conecta ÚNICAMENTE la lectura de "tasks". Todavía NO hay CREATE,
+   UPDATE, DELETE ni TOGGLE remotos — eso son los micro-pasos 5.2 a 5.5,
+   por separado. No toca habits/goals/money_goals/clients/content_items/
+   day_plans. No toca convertPlanToTasks(). window.storage sigue intacto:
+   sigue siendo el valor de arranque por defecto de db.tasks; esta sección
+   solo lo reemplaza DESPUÉS, si hay sesión, igual que ya pasa con el perfil. */
+
+function mapRemoteTaskToLocal(remote){
+  return {
+    id: remote.id,
+    titulo: remote.titulo,
+    descripcion: remote.descripcion || '',
+    link: remote.link || '',
+    fecha: remote.fecha,
+    hora: (remote.hora || '').slice(0,5), // Postgres "time" devuelve HH:MM:SS, la UI usa HH:MM
+    categoria: remote.categoria,
+    prioridad: remote.prioridad,
+    completada: !!remote.completada,
+    creadoEn: remote.created_at,
+  };
+}
+
+async function loadRemoteTasks(userId){
+  if(!supabaseClient) return null;
+  try{
+    const { data, error } = await supabaseClient
+      .from('tasks')
+      .select('*')
+      .eq('user_id', userId); // filtro explícito con el id de la sesión — RLS es la barrera real
+    if(error){ console.error('Error al leer las tareas remotas', error); return null; }
+    return data;
+  }catch(e){
+    console.error('Error inesperado al leer las tareas remotas', e);
+    return null;
+  }
+}
+
+async function syncRemoteTasks(){
+  if(!supabaseClient || !currentSession) return; // sin sesión, no se toca nada remoto
+  const remoteRows = await loadRemoteTasks(currentSession.user.id);
+  if(remoteRows){
+    db.tasks = remoteRows.map(mapRemoteTaskToLocal);
+  }
+  // Si remoteRows es null (error), db.tasks queda tal como lo dejó window.storage —
+  // fallback seguro, no se rompe el flujo ni se muestra una lista vacía por error.
+}
+
 /* ======================= BOOT / ROUTER ======================= */
 async function continueAppFlow(){
   // Cuerpo original de "boot()" (Paso 2), sin cambios en su orden ni su
-  // lógica — solo se agregó el "await syncRemoteProfile()" antes de decidir
-  // la pantalla, para que la decisión use el perfil ya sincronizado.
+  // lógica — solo se agregaron los "await syncX()" antes de decidir la
+  // pantalla, para que la decisión use los datos ya sincronizados.
   applyTheme(db.settings.theme, false);
   buildStaticChips();
   await syncRemoteProfile();
+  await syncRemoteTasks();
   if(db.profile.onboarded){
     switchScreen('home');
   } else {
