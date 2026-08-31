@@ -1,3 +1,5 @@
+FELRO Daily Spark ya
+100 %
 <!DOCTYPE html>
 <html lang="es">
 <head>
@@ -1262,23 +1264,105 @@ async function requestMagicLink(){
 }
 
 // Reacciona cuando cambia el estado de Auth (por ejemplo, al volver del Magic Link).
-// Todavía no crea ni toca ningún dato — solo decide qué pantalla mostrar.
 if(supabaseClient){
-  supabaseClient.auth.onAuthStateChange((event, session)=>{
+  supabaseClient.auth.onAuthStateChange(async (event, session)=>{
     currentSession = session;
     if(session && currentScreen === 'login'){
-      continueAppFlow();
+      await continueAppFlow();
     }
   });
 }
 
+/* ======================= PROFILES SYNC (Paso 4) =======================
+   Piloto: conecta ÚNICAMENTE la tabla "profiles" (id = auth.uid()).
+   No toca tasks/habits/goals/money_goals/clients/content_items/day_plans.
+   No reemplaza window.storage — sigue siendo el respaldo local de siempre.
+   Regla de precedencia acordada: si hay fila remota, el remoto manda y se
+   carga en db.profile; si no hay fila remota, se crea una mínima (con los
+   defaults reales de la tabla) sin copiar datos locales automáticamente.
+   Los campos remotos theme/is_pro/notif/lang/created_at/updated_at
+   (que existen en "profiles" porque esa tabla fusiona profile+settings)
+   quedan exclusivamente del lado de Supabase en este piloto — db.profile
+   nunca tuvo esos campos y db.settings sigue siendo 100% local todavía. */
+
+function mapRemoteProfileToLocal(remote){
+  return {
+    nombre: remote.nombre || '',
+    avatar: remote.avatar || '✨',
+    tipoUsuario: remote.tipo_usuario || '',
+    tipoLabel: remote.tipo_label || '',
+    objetivoPrincipal: remote.objetivo_principal || '',
+    tiempoDisponible: remote.tiempo_disponible || '',
+    onboarded: !!remote.onboarded,
+  };
+}
+
+async function getOrCreateRemoteProfile(userId){
+  if(!supabaseClient) return null;
+  try{
+    const { data: existing, error: selError } = await supabaseClient
+      .from('profiles').select('*').eq('id', userId).maybeSingle();
+    if(selError){ console.error('Error al leer el perfil remoto', selError); return null; }
+    if(existing) return existing;
+
+    // No existe fila remota todavía: se crea una mínima, solo con "id".
+    // El resto de las columnas queda en sus defaults reales de la tabla
+    // (nombre/avatar/etc. en null, onboarded=false, theme='nude', etc.) —
+    // no se copia nada de db.profile local acá, tal como se aprobó.
+    const { data: created, error: insError } = await supabaseClient
+      .from('profiles').insert({ id: userId }).select().maybeSingle();
+    if(insError){
+      console.error('Error al crear el perfil remoto', insError);
+      // Posible carrera (otra pestaña ya lo creó): un único reintento de lectura.
+      const { data: retry } = await supabaseClient.from('profiles').select('*').eq('id', userId).maybeSingle();
+      return retry || null;
+    }
+    return created;
+  }catch(e){
+    console.error('Error inesperado al sincronizar el perfil remoto', e);
+    return null;
+  }
+}
+
+async function syncRemoteProfile(){
+  if(!supabaseClient || !currentSession) return; // sin sesión, no se toca nada remoto
+  const remote = await getOrCreateRemoteProfile(currentSession.user.id);
+  if(remote){
+    db.profile = mapRemoteProfileToLocal(remote);
+  }
+  // Si remote es null (error de red/RLS), db.profile queda tal como estaba
+  // localmente — fallback seguro, no se rompe el flujo existente.
+}
+
+async function saveRemoteProfile(){
+  if(!supabaseClient || !currentSession) return;
+  try{
+    const { error } = await supabaseClient
+      .from('profiles')
+      .update({
+        nombre: db.profile.nombre,
+        avatar: db.profile.avatar,
+        tipo_usuario: db.profile.tipoUsuario,
+        tipo_label: db.profile.tipoLabel,
+        objetivo_principal: db.profile.objetivoPrincipal,
+        tiempo_disponible: db.profile.tiempoDisponible,
+        onboarded: db.profile.onboarded,
+      })
+      .eq('id', currentSession.user.id);
+    if(error) console.error('Error al guardar el perfil remoto', error);
+  }catch(e){
+    console.error('Error inesperado al guardar el perfil remoto', e);
+  }
+}
+
 /* ======================= BOOT / ROUTER ======================= */
-function continueAppFlow(){
-  // Este es exactamente el cuerpo que "boot()" ya tenía antes del Paso 3 —
-  // no se modificó ni una línea, solo se trasladó acá para poder anteponerle
-  // el chequeo de sesión sin tocar su comportamiento.
+async function continueAppFlow(){
+  // Cuerpo original de "boot()" (Paso 2), sin cambios en su orden ni su
+  // lógica — solo se agregó el "await syncRemoteProfile()" antes de decidir
+  // la pantalla, para que la decisión use el perfil ya sincronizado.
   applyTheme(db.settings.theme, false);
   buildStaticChips();
+  await syncRemoteProfile();
   if(db.profile.onboarded){
     switchScreen('home');
   } else {
@@ -1288,7 +1372,7 @@ function continueAppFlow(){
 async function boot(){
   currentSession = await checkExistingSession();
   if(currentSession){
-    continueAppFlow();
+    await continueAppFlow();
   } else {
     switchScreen('login');
   }
@@ -1344,7 +1428,8 @@ async function finishOnboarding(){
     tiempoDisponible: onbData.tiempo,
     onboarded: true,
   };
-  await save('profile');
+  await save('profile'); // sin cambios: sigue guardando en window.storage como respaldo local
+  await saveRemoteProfile(); // Paso 4 — persiste el mismo resultado en la fila remota, si hay sesión
   switchScreen('home');
   showToast('¡Tu espacio está listo! ✨');
 }
