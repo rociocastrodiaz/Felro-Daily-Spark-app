@@ -1,4 +1,5 @@
-FELRO Daily Spark ya
+Prueba la IA directamente en tus aplicaciones favoritas … Usa Gemini para generar borradores y pulir contenido, y disfruta de Gemini Pro con acceso a la IA de nueva generación de Google por 19,99 US$ 9,99 US$ durante 2 meses
+felro-daily-spark (6).html
 100 %
 <!DOCTYPE html>
 <html lang="es">
@@ -730,7 +731,7 @@ p{margin:0;}
     <div class="field"><label>Prioridad</label><div class="chip-select" id="prioSelect"></div></div>
     <div class="sheet-actions">
       <button class="btn-ghost" onclick="closeModal('taskOverlay')">Cancelar</button>
-      <button class="btn-primary" onclick="submitTask()">Guardar tarea</button>
+      <button class="btn-primary" id="taskSubmitBtn" onclick="submitTask()">Guardar tarea</button>
     </div>
     <button class="btn-danger btn-full" id="deleteBtn" style="display:none; margin-top:8px;" onclick="deleteTaskConfirm()">Eliminar tarea</button>
   </div>
@@ -1757,11 +1758,62 @@ async function submitTask(){
   if(!fecha||!hora){ showToast('Elegí fecha y hora'); return; }
   const id=document.getElementById('taskId').value;
   const data={titulo, descripcion:document.getElementById('fDesc').value.trim(), link:document.getElementById('fLink').value.trim(), fecha, hora, categoria:cat?cat.dataset.val:'otros', prioridad:prio?prio.dataset.val:'media'};
-  if(id){ Object.assign(db.tasks.find(x=>x.id===id), data); }
-  else{ db.tasks.push(Object.assign({id:uid(), completada:false, creadoEn:new Date().toISOString()}, data)); }
-  await save('tasks');
-  selectedDate=fecha; closeModal('taskOverlay'); renderDay(); renderHome();
-  showToast(id?'Tarea actualizada':'Tarea agregada');
+  if(id){
+    // Paso 5.2 — la edición NO se conecta a Supabase todavía; rama local intacta.
+    Object.assign(db.tasks.find(x=>x.id===id), data);
+    await save('tasks');
+    selectedDate=fecha; closeModal('taskOverlay'); renderDay(); renderHome();
+    showToast('Tarea actualizada');
+    return;
+  }
+
+  // Paso 5.2 — CREATE conectado a Supabase. Orden estricto:
+  // validar (ya hecho arriba) → INSERT remoto → comprobar éxito real →
+  // recién ahí db.tasks → save('tasks') → cerrar modal → renderizar → toast.
+  if(!supabaseClient || !currentSession){
+    showToast('No hay sesión activa — no se pudo guardar la tarea.');
+    return;
+  }
+  const btn = document.getElementById('taskSubmitBtn');
+  btn.disabled = true;
+  try{
+    const { data: inserted, error } = await supabaseClient
+      .from('tasks')
+      .insert({
+        user_id: currentSession.user.id,
+        titulo: data.titulo,
+        descripcion: data.descripcion,
+        link: data.link,
+        fecha: data.fecha,
+        hora: data.hora,
+        categoria: data.categoria,
+        prioridad: data.prioridad,
+        completada: false,
+      })
+      .select()
+      .single();
+
+    // Éxito real: no alcanza con que la llamada haya terminado sin excepción —
+    // se exige explícitamente error===null, que exista la fila, que tenga id,
+    // y que el user_id devuelto coincida con la sesión actual.
+    const success = !error && inserted && inserted.id && inserted.user_id === currentSession.user.id;
+
+    if(!success){
+      console.error('Error al crear la tarea remota', error || inserted);
+      showToast('No pudimos guardar la tarea. Probá de nuevo en un momento.');
+      return; // db.tasks y window.storage NO se tocan
+    }
+
+    db.tasks.push(mapRemoteTaskToLocal(inserted));
+    await save('tasks'); // respaldo local, solo después del éxito confirmado
+    selectedDate=fecha; closeModal('taskOverlay'); renderDay(); renderHome();
+    showToast('Tarea agregada');
+  }catch(e){
+    console.error('Error inesperado al crear la tarea remota', e);
+    showToast('No pudimos guardar la tarea. Probá de nuevo en un momento.');
+  }finally{
+    btn.disabled = false;
+  }
 }
 async function toggleComplete(id){ const t=db.tasks.find(x=>x.id===id); if(!t) return; t.completada=!t.completada; await save('tasks'); renderDay(); renderHome(); }
 function deleteTaskConfirm(){ const id=document.getElementById('taskId').value; if(id) askDeleteTask(id); }
