@@ -1,5 +1,5 @@
 Prueba la IA directamente en tus aplicaciones favoritas … Usa Gemini para generar borradores y pulir contenido, y disfruta de Gemini Pro con acceso a la IA de nueva generación de Google por 19,99 US$ 9,99 US$ durante 2 meses
-felro-daily-spark (6).html
+felro-daily-spark (7).html
 100 %
 <!DOCTYPE html>
 <html lang="es">
@@ -647,7 +647,7 @@ p{margin:0;}
     <div class="settings-item"><span>Notificaciones</span><button class="toggle" id="toggleNotif" onclick="toggleNotif()"></button></div>
     <div class="settings-item" onclick="openThemes()"><span>Tema</span><span class="si-val" id="curThemeLabel">›</span></div>
     <div class="settings-item" onclick="openLangPicker()"><span>Idioma</span><span class="si-val" id="curLangLabel">Español ›</span></div>
-    <div class="settings-item" onclick="showToast('Cuenta de demostración — la autenticación real se conecta en la próxima etapa.')"><span>Cuenta</span><span class="si-val">Demo ›</span></div>
+    <div class="settings-item" onclick="askConfirm('Cerrar sesión','¿Confirmás que querés cerrar tu sesión?', signOut)"><span>Cuenta</span><span class="si-val" id="curAccountLabel">Demo ›</span></div>
     <div class="settings-item" onclick="openPaywall('general')"><span>Plan actual</span><span class="si-val" id="curPlanLabel">FREE ›</span></div>
   </div>
 
@@ -1222,6 +1222,23 @@ async function checkExistingSession(){
     console.error('Error al verificar sesión de Supabase', e);
     return null;
   }
+}
+
+// Cierre de sesión (Perfil → Configuración → Cuenta). onAuthStateChange
+// (más abajo) es quien actualiza "currentSession" al null real que dispara
+// Supabase — acá no se lo pisa a mano, para tener una sola fuente de verdad.
+// window.storage NO se toca. boot()/continueAppFlow() no se modifican: el
+// reload hace que se vuelvan a ejecutar solos, desde cero, como en cualquier
+// primera visita sin sesión.
+async function signOut(){
+  if(!supabaseClient) return;
+  try{
+    await supabaseClient.auth.signOut();
+  }catch(e){
+    console.error('Error al cerrar sesión', e);
+  }
+  Object.keys(STORE_KEYS).forEach(k=> db[k] = defaultFor(k));
+  window.location.reload();
 }
 
 function setLoginMsg(text, kind){
@@ -2231,6 +2248,7 @@ function renderProfile(){
   document.getElementById('curThemeLabel').textContent = (THEMES.find(t=>t.id===db.settings.theme)||{}).name + ' ›';
   document.getElementById('curLangLabel').textContent = (db.settings.lang==='es'?'Español':'English') + ' ›';
   document.getElementById('toggleNotif').classList.toggle('on', db.settings.notif);
+  document.getElementById('curAccountLabel').textContent = (currentSession ? currentSession.user.email : 'Demo') + ' ›';
   document.getElementById('profLockEntre').textContent = db.settings.isPro? '›' : '🔒 PRO ›';
   document.getElementById('profLockWeek').textContent = db.settings.isPro? '›' : '🔒 PRO ›';
 }
