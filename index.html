@@ -1,5 +1,5 @@
 Prueba la IA directamente en tus aplicaciones favoritas … Usa Gemini para generar borradores y pulir contenido, y disfruta de Gemini Pro con acceso a la IA de nueva generación de Google por 19,99 US$ 9,99 US$ durante 2 meses
-felro-daily-spark (7).html
+FELRO Daily Spark(10)
 100 %
 <!DOCTYPE html>
 <html lang="es">
@@ -1776,11 +1776,53 @@ async function submitTask(){
   const id=document.getElementById('taskId').value;
   const data={titulo, descripcion:document.getElementById('fDesc').value.trim(), link:document.getElementById('fLink').value.trim(), fecha, hora, categoria:cat?cat.dataset.val:'otros', prioridad:prio?prio.dataset.val:'media'};
   if(id){
-    // Paso 5.2 — la edición NO se conecta a Supabase todavía; rama local intacta.
-    Object.assign(db.tasks.find(x=>x.id===id), data);
-    await save('tasks');
-    selectedDate=fecha; closeModal('taskOverlay'); renderDay(); renderHome();
-    showToast('Tarea actualizada');
+    // Paso 5.3 — EDIT conectado a Supabase. Mismo orden estricto que CREATE:
+    // validar (ya hecho arriba) → UPDATE remoto → comprobar éxito real →
+    // recién ahí db.tasks → save('tasks') → cerrar modal → renderizar → toast.
+    if(!supabaseClient || !currentSession){
+      showToast('No hay sesión activa — no se pudo guardar la tarea.');
+      return;
+    }
+    const editBtn = document.getElementById('taskSubmitBtn');
+    editBtn.disabled = true;
+    try{
+      const { data: updated, error } = await supabaseClient
+        .from('tasks')
+        .update({
+          titulo: data.titulo,
+          descripcion: data.descripcion,
+          link: data.link,
+          fecha: data.fecha,
+          hora: data.hora,
+          categoria: data.categoria,
+          prioridad: data.prioridad,
+        })
+        .eq('id', id)
+        .select()
+        .single();
+
+      // Mismo criterio estricto que en CREATE: no alcanza con que la llamada
+      // termine sin excepción — se exige error===null, que exista la fila,
+      // que tenga id, y que su user_id coincida con la sesión actual (si RLS
+      // no encontró ninguna fila para editar, "updated" viene vacío/null).
+      const success = !error && updated && updated.id && updated.user_id === currentSession.user.id;
+
+      if(!success){
+        console.error('Error al editar la tarea remota', error || updated);
+        showToast('No pudimos guardar los cambios. Probá de nuevo en un momento.');
+        return; // db.tasks y window.storage NO se tocan
+      }
+
+      Object.assign(db.tasks.find(x=>x.id===id), mapRemoteTaskToLocal(updated));
+      await save('tasks'); // respaldo local, solo después del éxito confirmado
+      selectedDate=fecha; closeModal('taskOverlay'); renderDay(); renderHome();
+      showToast('Tarea actualizada');
+    }catch(e){
+      console.error('Error inesperado al editar la tarea remota', e);
+      showToast('No pudimos guardar los cambios. Probá de nuevo en un momento.');
+    }finally{
+      editBtn.disabled = false;
+    }
     return;
   }
 
