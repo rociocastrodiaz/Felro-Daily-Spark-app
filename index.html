@@ -1,5 +1,5 @@
 Prueba la IA directamente en tus aplicaciones favoritas … Usa Gemini para generar borradores y pulir contenido, y disfruta de Gemini Pro con acceso a la IA de nueva generación de Google por 19,99 US$ 9,99 US$ durante 2 meses
-FELRO Daily Spark(20)
+FELRO Daily Spark(25)
 100 %
 <!DOCTYPE html>
 <html lang="es">
@@ -1421,6 +1421,48 @@ async function syncRemoteTasks(){
   // fallback seguro, no se rompe el flujo ni se muestra una lista vacía por error.
 }
 
+/* ======================= HABITS SYNC — READ (solo lectura) =======================
+   Mismo patrón que TASKS SYNC (Paso 5.1). Todavía NO hay CREATE, UPDATE,
+   TOGGLE ni DELETE remotos para hábitos. No toca tasks/goals/money_goals/
+   clients/content_items/day_plans. No toca convertPlanToTasks(). window.storage
+   sigue siendo el valor de arranque por defecto de db.habits; esta sección
+   solo lo reemplaza DESPUÉS, si hay sesión, igual que profile y tasks. */
+
+function mapRemoteHabitToLocal(remote){
+  return {
+    id: remote.id,
+    nombre: remote.nombre,
+    emoji: remote.emoji,
+    completions: remote.completions || {},
+    creadoEn: remote.created_at,
+  };
+}
+
+async function loadRemoteHabits(userId){
+  if(!supabaseClient) return null;
+  try{
+    const { data, error } = await supabaseClient
+      .from('habits')
+      .select('*')
+      .eq('user_id', userId); // filtro explícito con el id de la sesión — RLS es la barrera real
+    if(error){ console.error('Error al leer los hábitos remotos', error); return null; }
+    return data;
+  }catch(e){
+    console.error('Error inesperado al leer los hábitos remotos', e);
+    return null;
+  }
+}
+
+async function syncRemoteHabits(){
+  if(!supabaseClient || !currentSession) return; // sin sesión, no se toca nada remoto
+  const remoteRows = await loadRemoteHabits(currentSession.user.id);
+  if(remoteRows){
+    db.habits = remoteRows.map(mapRemoteHabitToLocal);
+  }
+  // Si remoteRows es null (error), db.habits queda tal como lo dejó window.storage —
+  // mismo fallback seguro que ya usa syncRemoteTasks().
+}
+
 /* ======================= BOOT / ROUTER ======================= */
 async function continueAppFlow(){
   // Cuerpo original de "boot()" (Paso 2), sin cambios en su orden ni su
@@ -1430,6 +1472,7 @@ async function continueAppFlow(){
   buildStaticChips();
   await syncRemoteProfile();
   await syncRemoteTasks();
+  await syncRemoteHabits();
   if(db.profile.onboarded){
     switchScreen('home');
   } else {
