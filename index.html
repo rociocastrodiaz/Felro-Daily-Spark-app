@@ -1,5 +1,5 @@
 Prueba la IA directamente en tus aplicaciones favoritas … Usa Gemini para generar borradores y pulir contenido, y disfruta de Gemini Pro con acceso a la IA de nueva generación de Google por 19,99 US$ 9,99 US$ durante 2 meses
-FELRO Daily Spark(10)
+FELRO Daily Spark(11)
 100 %
 <!DOCTYPE html>
 <html lang="es">
@@ -1670,6 +1670,7 @@ async function saveWizPlan(){
 /* ======================= TASKS (Mi día) ======================= */
 let selectedDate = todayISO();
 let prioFilter = 'all';
+let tasksInFlight = new Set(); // Paso 5.4 — evita dobles toggles concurrentes por id
 function changeDate(delta){ const d=new Date(selectedDate+'T00:00:00'); d.setDate(d.getDate()+delta); selectedDate=d.toISOString().slice(0,10); renderDay(); }
 function goToday(){ selectedDate=todayISO(); renderDay(); }
 function setPrioFilter(p){ prioFilter=p; document.querySelectorAll('.prio-chip').forEach(el=>el.classList.toggle('active', el.dataset.prio===p)); renderDay(); }
@@ -1874,7 +1875,41 @@ async function submitTask(){
     btn.disabled = false;
   }
 }
-async function toggleComplete(id){ const t=db.tasks.find(x=>x.id===id); if(!t) return; t.completada=!t.completada; await save('tasks'); renderDay(); renderHome(); }
+async function toggleComplete(id){
+  const t=db.tasks.find(x=>x.id===id); if(!t) return;
+  if(tasksInFlight.has(id)) return; // ya hay un toggle de esta tarea en curso, se ignora el segundo click
+  if(!supabaseClient || !currentSession){ showToast('No hay sesión activa — no se pudo actualizar la tarea.'); return; }
+
+  tasksInFlight.add(id);
+  const nuevoValor = !t.completada;
+  try{
+    const { data: updated, error } = await supabaseClient
+      .from('tasks')
+      .update({ completada: nuevoValor })
+      .eq('id', id)
+      .select()
+      .single();
+
+    // Mismo criterio estricto que CREATE/UPDATE: error===null, fila devuelta,
+    // con id, y user_id coincidente con la sesión actual.
+    const success = !error && updated && updated.id && updated.user_id === currentSession.user.id;
+
+    if(!success){
+      console.error('Error al actualizar completada', error || updated);
+      showToast('No pudimos actualizar la tarea. Probá de nuevo en un momento.');
+      return; // db.tasks NO se toca — la pantalla ya sigue mostrando el estado correcto sin cambios
+    }
+
+    t.completada = updated.completada;
+    await save('tasks'); // respaldo local, solo después del éxito confirmado
+    renderDay(); renderHome();
+  }catch(e){
+    console.error('Error inesperado al actualizar completada', e);
+    showToast('No pudimos actualizar la tarea. Probá de nuevo en un momento.');
+  }finally{
+    tasksInFlight.delete(id);
+  }
+}
 function deleteTaskConfirm(){ const id=document.getElementById('taskId').value; if(id) askDeleteTask(id); }
 function askDeleteTask(id){ askConfirm('Eliminar tarea','Esta acción no se puede deshacer. ¿Confirmás que querés eliminarla?', ()=>deleteTask(id)); }
 async function deleteTask(id){ db.tasks=db.tasks.filter(t=>t.id!==id); await save('tasks'); closeModal('taskOverlay'); renderDay(); renderHome(); showToast('Tarea eliminada'); }
