@@ -1,5 +1,5 @@
 Prueba la IA directamente en tus aplicaciones favoritas … Usa Gemini para generar borradores y pulir contenido, y disfruta de Gemini Pro con acceso a la IA de nueva generación de Google por 19,99 US$ 9,99 US$ durante 2 meses
-FELRO Daily Spark(11)
+FELRO Daily Spark(20)
 100 %
 <!DOCTYPE html>
 <html lang="es">
@@ -1912,7 +1912,40 @@ async function toggleComplete(id){
 }
 function deleteTaskConfirm(){ const id=document.getElementById('taskId').value; if(id) askDeleteTask(id); }
 function askDeleteTask(id){ askConfirm('Eliminar tarea','Esta acción no se puede deshacer. ¿Confirmás que querés eliminarla?', ()=>deleteTask(id)); }
-async function deleteTask(id){ db.tasks=db.tasks.filter(t=>t.id!==id); await save('tasks'); closeModal('taskOverlay'); renderDay(); renderHome(); showToast('Tarea eliminada'); }
+async function deleteTask(id){
+  if(tasksInFlight.has(id)) return; // ya hay una operación de esta tarea en curso (toggle o delete)
+  if(!supabaseClient || !currentSession){ showToast('No hay sesión activa — no se pudo eliminar la tarea.'); return; }
+
+  tasksInFlight.add(id);
+  try{
+    const { data: deleted, error } = await supabaseClient
+      .from('tasks')
+      .delete()
+      .eq('id', id)
+      .select()
+      .single();
+
+    // Mismo criterio estricto que CREATE/UPDATE/TOGGLE: error===null, fila
+    // devuelta (confirma que realmente se borró algo), con id, y user_id
+    // coincidente con la sesión actual.
+    const success = !error && deleted && deleted.id && deleted.user_id === currentSession.user.id;
+
+    if(!success){
+      console.error('Error al eliminar la tarea remota', error || deleted);
+      showToast('No pudimos eliminar la tarea. Probá de nuevo en un momento.');
+      return; // db.tasks NO se toca — la tarea sigue existiendo, en pantalla y en Supabase
+    }
+
+    db.tasks=db.tasks.filter(t=>t.id!==id);
+    await save('tasks'); // respaldo local, solo después del éxito confirmado
+    closeModal('taskOverlay'); renderDay(); renderHome(); showToast('Tarea eliminada');
+  }catch(e){
+    console.error('Error inesperado al eliminar la tarea remota', e);
+    showToast('No pudimos eliminar la tarea. Probá de nuevo en un momento.');
+  }finally{
+    tasksInFlight.delete(id);
+  }
+}
 
 /* ======================= SHARE (Pinterest) ======================= */
 async function renderExportCanvas(){
