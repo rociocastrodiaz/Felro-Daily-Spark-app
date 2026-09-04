@@ -1,5 +1,5 @@
 Prueba la IA directamente en tus aplicaciones favoritas … Usa Gemini para generar borradores y pulir contenido, y disfruta de Gemini Pro con acceso a la IA de nueva generación de Google por 19,99 US$ 9,99 US$ durante 2 meses
-FELRO Daily Spark(25)
+FELRO Daily Spark(28)
 100 %
 <!DOCTYPE html>
 <html lang="es">
@@ -747,7 +747,7 @@ p{margin:0;}
     <div class="field"><label>Nombre del hábito</label><input type="text" id="fHabitName" placeholder="Ej: Tomar agua" maxlength="40"></div>
     <div class="sheet-actions">
       <button class="btn-ghost" onclick="closeModal('habitOverlay')">Cancelar</button>
-      <button class="btn-primary" onclick="submitHabit()">Guardar hábito</button>
+      <button class="btn-primary" id="habitSubmitBtn" onclick="submitHabit()">Guardar hábito</button>
     </div>
     <button class="btn-danger btn-full" id="deleteHabitBtn" style="display:none; margin-top:8px;" onclick="deleteHabitConfirm()">Eliminar hábito</button>
   </div>
@@ -2039,10 +2039,55 @@ async function submitHabit(){
   const nombre=document.getElementById('fHabitName').value.trim();
   if(!nombre){ showToast('Poné un nombre para el hábito'); return; }
   const id=document.getElementById('habitId').value;
-  if(id){ const h=db.habits.find(x=>x.id===id); h.nombre=nombre; h.emoji=pickedHabitEmoji; }
-  else{ db.habits.push({id:uid(), nombre, emoji:pickedHabitEmoji, completions:{}, creadoEn:new Date().toISOString()}); }
-  await save('habits'); closeModal('habitOverlay'); renderHabits(); renderHome();
-  showToast(id?'Hábito actualizado':'Hábito agregado');
+  if(id){
+    // HABITS UPDATE — todavía NO conectado a Supabase; rama local intacta.
+    const h=db.habits.find(x=>x.id===id); h.nombre=nombre; h.emoji=pickedHabitEmoji;
+    await save('habits'); closeModal('habitOverlay'); renderHabits(); renderHome();
+    showToast('Hábito actualizado');
+    return;
+  }
+
+  // HABITS CREATE conectado a Supabase. Orden estricto:
+  // validar (ya hecho arriba) → INSERT remoto → comprobar éxito real →
+  // recién ahí db.habits → save('habits') → cerrar modal → renderizar → toast.
+  if(!supabaseClient || !currentSession){
+    showToast('No hay sesión activa — no se pudo guardar el hábito.');
+    return;
+  }
+  const habitBtn = document.getElementById('habitSubmitBtn');
+  habitBtn.disabled = true;
+  try{
+    const { data: inserted, error } = await supabaseClient
+      .from('habits')
+      .insert({
+        user_id: currentSession.user.id,
+        nombre: nombre,
+        emoji: pickedHabitEmoji,
+        completions: {},
+      })
+      .select()
+      .single();
+
+    // Éxito real: error===null, existe la fila, tiene id, y el user_id
+    // devuelto coincide con la sesión actual — mismo criterio que tasks.
+    const success = !error && inserted && inserted.id && inserted.user_id === currentSession.user.id;
+
+    if(!success){
+      console.error('Error al crear el hábito remoto', error || inserted);
+      showToast('No pudimos guardar el hábito. Probá de nuevo en un momento.');
+      return; // db.habits y window.storage NO se tocan
+    }
+
+    db.habits.push(mapRemoteHabitToLocal(inserted));
+    await save('habits'); // respaldo local, solo después del éxito confirmado
+    closeModal('habitOverlay'); renderHabits(); renderHome();
+    showToast('Hábito agregado');
+  }catch(e){
+    console.error('Error inesperado al crear el hábito remoto', e);
+    showToast('No pudimos guardar el hábito. Probá de nuevo en un momento.');
+  }finally{
+    habitBtn.disabled = false;
+  }
 }
 function deleteHabitConfirm(){ const id=document.getElementById('habitId').value; if(id) askConfirm('Eliminar hábito','¿Confirmás que querés eliminar este hábito y su historial?', ()=>deleteHabit(id)); }
 async function deleteHabit(id){ db.habits=db.habits.filter(h=>h.id!==id); await save('habits'); closeModal('habitOverlay'); renderHabits(); renderHome(); showToast('Hábito eliminado'); }
