@@ -1,5 +1,5 @@
 Prueba la IA directamente en tus aplicaciones favoritas … Usa Gemini para generar borradores y pulir contenido, y disfruta de Gemini Pro con acceso a la IA de nueva generación de Google por 19,99 US$ 9,99 US$ durante 2 meses
-FELRO Daily Spark(28)
+FELRO Daily Spark(29)
 100 %
 <!DOCTYPE html>
 <html lang="es">
@@ -2040,10 +2040,44 @@ async function submitHabit(){
   if(!nombre){ showToast('Poné un nombre para el hábito'); return; }
   const id=document.getElementById('habitId').value;
   if(id){
-    // HABITS UPDATE — todavía NO conectado a Supabase; rama local intacta.
-    const h=db.habits.find(x=>x.id===id); h.nombre=nombre; h.emoji=pickedHabitEmoji;
-    await save('habits'); closeModal('habitOverlay'); renderHabits(); renderHome();
-    showToast('Hábito actualizado');
+    // HABITS UPDATE conectado a Supabase. Mismo orden estricto que las demás
+    // operaciones: UPDATE remoto → comprobar éxito real → recién ahí
+    // db.habits → save('habits') → cerrar modal → renderizar → toast.
+    if(!supabaseClient || !currentSession){
+      showToast('No hay sesión activa — no se pudo guardar el hábito.');
+      return;
+    }
+    const editHabitBtn = document.getElementById('habitSubmitBtn');
+    editHabitBtn.disabled = true;
+    try{
+      const { data: updated, error } = await supabaseClient
+        .from('habits')
+        .update({ nombre: nombre, emoji: pickedHabitEmoji })
+        .eq('id', id)
+        .select()
+        .single();
+
+      // Mismo criterio estricto que en las demás operaciones: error===null,
+      // fila devuelta, con id, y user_id coincidente con la sesión actual.
+      const success = !error && updated && updated.id && updated.user_id === currentSession.user.id;
+
+      if(!success){
+        console.error('Error al editar el hábito remoto', error || updated);
+        showToast('No pudimos guardar los cambios. Probá de nuevo en un momento.');
+        return; // db.habits y window.storage NO se tocan
+      }
+
+      const h=db.habits.find(x=>x.id===id);
+      Object.assign(h, mapRemoteHabitToLocal(updated));
+      await save('habits'); // respaldo local, solo después del éxito confirmado
+      closeModal('habitOverlay'); renderHabits(); renderHome();
+      showToast('Hábito actualizado');
+    }catch(e){
+      console.error('Error inesperado al editar el hábito remoto', e);
+      showToast('No pudimos guardar los cambios. Probá de nuevo en un momento.');
+    }finally{
+      editHabitBtn.disabled = false;
+    }
     return;
   }
 
