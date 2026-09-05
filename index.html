@@ -1,5 +1,5 @@
 Prueba la IA directamente en tus aplicaciones favoritas … Usa Gemini para generar borradores y pulir contenido, y disfruta de Gemini Pro con acceso a la IA de nueva generación de Google por 19,99 US$ 9,99 US$ durante 2 meses
-FELRO Daily Spark(29)
+FELRO Daily Spark(30)
 100 %
 <!DOCTYPE html>
 <html lang="es">
@@ -2022,6 +2022,7 @@ async function shareDayImage(){
 
 /* ======================= HABITS ======================= */
 let pickedHabitEmoji = '✨';
+let habitsInFlight = new Set(); // evita dobles toggles concurrentes por id de hábito (propio, separado de tasksInFlight)
 function pickHabitEmoji(e){ pickedHabitEmoji=e; document.querySelectorAll('#habitEmojiSelect .chip').forEach(el=>{const on=el.dataset.val===e; el.classList.toggle('active',on); el.style.background=on?'var(--accent)':''; el.style.borderColor=on?'var(--accent)':'';}); }
 function openHabitModal(id){
   buildStaticChips();
@@ -2128,8 +2129,40 @@ async function deleteHabit(id){ db.habits=db.habits.filter(h=>h.id!==id); await 
 async function toggleHabit(id){
   const h=db.habits.find(x=>x.id===id); if(!h) return;
   const iso=todayISO();
-  if(h.completions[iso]) delete h.completions[iso]; else h.completions[iso]=true;
-  await save('habits'); renderHabits(); renderHome();
+  if(habitsInFlight.has(id)) return; // ya hay un toggle de este hábito en curso
+  if(!supabaseClient || !currentSession){ showToast('No hay sesión activa — no se pudo actualizar el hábito.'); return; }
+
+  habitsInFlight.add(id);
+  const nuevoCompletions = { ...h.completions };
+  if(nuevoCompletions[iso]) delete nuevoCompletions[iso]; else nuevoCompletions[iso] = true;
+
+  try{
+    const { data: updated, error } = await supabaseClient
+      .from('habits')
+      .update({ completions: nuevoCompletions })
+      .eq('id', id)
+      .select()
+      .single();
+
+    // Mismo criterio estricto que las demás operaciones: error===null,
+    // fila devuelta, con id, y user_id coincidente con la sesión actual.
+    const success = !error && updated && updated.id && updated.user_id === currentSession.user.id;
+
+    if(!success){
+      console.error('Error al actualizar completions', error || updated);
+      showToast('No pudimos actualizar el hábito. Probá de nuevo en un momento.');
+      return; // h.completions NO se toca — la pantalla ya sigue mostrando el estado correcto
+    }
+
+    h.completions = updated.completions;
+    await save('habits'); // respaldo local, solo después del éxito confirmado
+    renderHabits(); renderHome();
+  }catch(e){
+    console.error('Error inesperado al actualizar completions', e);
+    showToast('No pudimos actualizar el hábito. Probá de nuevo en un momento.');
+  }finally{
+    habitsInFlight.delete(id);
+  }
 }
 function habitStreak(h){ let s=0,d=new Date(todayISO()+'T00:00:00'); while(true){ const iso=d.toISOString().slice(0,10); if(h.completions[iso]){ s++; d.setDate(d.getDate()-1);} else break;} return s; }
 function habitBestStreak(h){
