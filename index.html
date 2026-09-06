@@ -1,5 +1,5 @@
 Prueba la IA directamente en tus aplicaciones favoritas … Usa Gemini para generar borradores y pulir contenido, y disfruta de Gemini Pro con acceso a la IA de nueva generación de Google por 19,99 US$ 9,99 US$ durante 2 meses
-FELRO Daily Spark(35)
+FELRO Daily Spark(39)
 100 %
 <!DOCTYPE html>
 <html lang="es">
@@ -769,7 +769,7 @@ p{margin:0;}
     <div class="field"><label>Acciones (una por línea)</label><textarea id="fGoalActions" placeholder="Crear portfolio&#10;Crear propuesta&#10;Contactar 5 negocios"></textarea></div>
     <div class="sheet-actions">
       <button class="btn-ghost" onclick="closeModal('goalOverlay')">Cancelar</button>
-      <button class="btn-primary" onclick="submitGoal()">Guardar objetivo</button>
+      <button class="btn-primary" id="goalSubmitBtn" onclick="submitGoal()">Guardar objetivo</button>
     </div>
     <button class="btn-danger btn-full" id="deleteGoalBtn" style="display:none; margin-top:8px;" onclick="deleteGoalConfirm()">Eliminar objetivo</button>
   </div>
@@ -1463,6 +1463,54 @@ async function syncRemoteHabits(){
   // mismo fallback seguro que ya usa syncRemoteTasks().
 }
 
+/* ======================= GOALS SYNC (READ) =======================
+   Supabase es la fuente de persistencia oficial de goals desde esta
+   migración. window.storage deja de recibir escrituras nuevas de goals
+   (ver submitGoal/deleteGoal/toggleGoalAction más abajo) — pero loadAll()
+   sigue leyendo 'felro:goals' sin cambios (es una función genérica
+   compartida con otros dominios que todavía no migraron, no se toca).
+   Esa lectura queda como valor de arranque por defecto, reemplazado acá
+   por el remoto si hay sesión — mismo patrón que profile/tasks/habits. */
+
+function mapRemoteGoalToLocal(remote){
+  return {
+    id: remote.id,
+    nombre: remote.nombre,
+    descripcion: remote.descripcion || '',
+    tipo: remote.tipo,
+    fechaObjetivo: remote.fecha_objetivo || '',
+    progreso: remote.progreso,
+    acciones: remote.acciones || [],
+    creadoEn: remote.created_at,
+  };
+}
+
+async function loadRemoteGoals(userId){
+  if(!supabaseClient) return null;
+  try{
+    const { data, error } = await supabaseClient
+      .from('goals')
+      .select('*')
+      .eq('user_id', userId); // filtro explícito con el id de la sesión — RLS es la barrera real
+    if(error){ console.error('Error al leer los objetivos remotos', error); return null; }
+    return data;
+  }catch(e){
+    console.error('Error inesperado al leer los objetivos remotos', e);
+    return null;
+  }
+}
+
+async function syncRemoteGoals(){
+  if(!supabaseClient || !currentSession) return; // sin sesión, no se toca nada remoto
+  const remoteRows = await loadRemoteGoals(currentSession.user.id);
+  if(remoteRows){
+    db.goals = remoteRows.map(mapRemoteGoalToLocal);
+  }
+  // Si remoteRows es null (error), db.goals queda tal como lo dejó window.storage —
+  // fallback seguro, mismo criterio que los demás dominios.
+}
+let goalsInFlight = new Set(); // evita operaciones duplicadas/simultáneas sobre el mismo goal (propio, separado de tasksInFlight/habitsInFlight)
+
 /* ======================= BOOT / ROUTER ======================= */
 async function continueAppFlow(){
   // Cuerpo original de "boot()" (Paso 2), sin cambios en su orden ni su
@@ -1473,6 +1521,7 @@ async function continueAppFlow(){
   await syncRemoteProfile();
   await syncRemoteTasks();
   await syncRemoteHabits();
+  await syncRemoteGoals();
   if(db.profile.onboarded){
     switchScreen('home');
   } else {
@@ -2274,17 +2323,121 @@ async function submitGoal(){
     progreso:Math.max(0,Math.min(100, Number(document.getElementById('fGoalProgress').value)||0)),
     tipo: type?type.dataset.val:'personal', acciones,
   };
-  if(id){ Object.assign(db.goals.find(x=>x.id===id), data); } else { db.goals.push(Object.assign({id:uid(), creadoEn:new Date().toISOString()}, data)); }
-  await save('goals'); closeModal('goalOverlay'); renderGoals(); renderHome();
-  showToast(id?'Objetivo actualizado':'Objetivo agregado');
+
+  if(!supabaseClient || !currentSession){
+    showToast('No hay sesión activa — no se pudo guardar el objetivo.');
+    return;
+  }
+  const goalBtn = document.getElementById('goalSubmitBtn');
+  goalBtn.disabled = true;
+  const remotePayload = {
+    nombre: data.nombre,
+    descripcion: data.descripcion,
+    tipo: data.tipo,
+    fecha_objetivo: data.fechaObjetivo || null,
+    progreso: data.progreso,
+    acciones: data.acciones,
+  };
+  try{
+    let result;
+    if(id){
+      // GOALS EDIT conectado a Supabase — remoto primero, local después.
+      result = await supabaseClient.from('goals').update(remotePayload).eq('id', id).select().single();
+    } else {
+      // GOALS CREATE conectado a Supabase — sin id, lo genera Postgres.
+      result = await supabaseClient.from('goals').insert({ user_id: currentSession.user.id, ...remotePayload }).select().single();
+    }
+    const { data: saved, error } = result;
+    const success = !error && saved && saved.id && saved.user_id === currentSession.user.id;
+
+    if(!success){
+      console.error('Error al guardar el objetivo remoto', error || saved);
+      showToast('No pudimos guardar el objetivo. Probá de nuevo en un momento.');
+      return; // db.goals NO se toca — window.storage tampoco
+    }
+
+    if(id){
+      Object.assign(db.goals.find(x=>x.id===id), mapRemoteGoalToLocal(saved));
+    } else {
+      db.goals.push(mapRemoteGoalToLocal(saved));
+    }
+    // Supabase es la fuente de persistencia de goals — no se llama a save('goals').
+    closeModal('goalOverlay'); renderGoals(); renderHome();
+    showToast(id?'Objetivo actualizado':'Objetivo agregado');
+  }catch(e){
+    console.error('Error inesperado al guardar el objetivo remoto', e);
+    showToast('No pudimos guardar el objetivo. Probá de nuevo en un momento.');
+  }finally{
+    goalBtn.disabled = false;
+  }
 }
 function deleteGoalConfirm(){ const id=document.getElementById('goalId').value; if(id) askConfirm('Eliminar objetivo','¿Confirmás que querés eliminar este objetivo?', ()=>deleteGoal(id)); }
-async function deleteGoal(id){ db.goals=db.goals.filter(g=>g.id!==id); await save('goals'); closeModal('goalOverlay'); renderGoals(); showToast('Objetivo eliminado'); }
+async function deleteGoal(id){
+  if(goalsInFlight.has(id)) return;
+  if(!supabaseClient || !currentSession){ showToast('No hay sesión activa — no se pudo eliminar el objetivo.'); return; }
+
+  goalsInFlight.add(id);
+  try{
+    const { data: deleted, error } = await supabaseClient
+      .from('goals')
+      .delete()
+      .eq('id', id)
+      .select()
+      .single();
+    const success = !error && deleted && deleted.id && deleted.user_id === currentSession.user.id;
+
+    if(!success){
+      console.error('Error al eliminar el objetivo remoto', error || deleted);
+      showToast('No pudimos eliminar el objetivo. Probá de nuevo en un momento.');
+      return; // db.goals NO se toca
+    }
+
+    db.goals=db.goals.filter(g=>g.id!==id);
+    // Supabase es la fuente de persistencia de goals — no se llama a save('goals').
+    closeModal('goalOverlay'); renderGoals(); showToast('Objetivo eliminado');
+  }catch(e){
+    console.error('Error inesperado al eliminar el objetivo remoto', e);
+    showToast('No pudimos eliminar el objetivo. Probá de nuevo en un momento.');
+  }finally{
+    goalsInFlight.delete(id);
+  }
+}
 async function toggleGoalAction(goalId, actionId){
-  const g=db.goals.find(x=>x.id===goalId); const a=g.acciones.find(x=>x.id===actionId); a.hecha=!a.hecha;
-  const total=g.acciones.length; const done=g.acciones.filter(x=>x.hecha).length;
-  if(total>0) g.progreso = Math.round((done/total)*100);
-  await save('goals'); renderGoals();
+  if(goalsInFlight.has(goalId)) return;
+  const g = db.goals.find(x=>x.id===goalId); if(!g) return;
+  if(!supabaseClient || !currentSession){ showToast('No hay sesión activa — no se pudo actualizar el objetivo.'); return; }
+
+  goalsInFlight.add(goalId);
+  const nuevasAcciones = g.acciones.map(a => a.id===actionId ? {...a, hecha: !a.hecha} : a);
+  const total = nuevasAcciones.length;
+  const done = nuevasAcciones.filter(a=>a.hecha).length;
+  const nuevoProgreso = total>0 ? Math.round((done/total)*100) : g.progreso;
+
+  try{
+    const { data: updated, error } = await supabaseClient
+      .from('goals')
+      .update({ acciones: nuevasAcciones, progreso: nuevoProgreso })
+      .eq('id', goalId)
+      .select()
+      .single();
+    const success = !error && updated && updated.id && updated.user_id === currentSession.user.id;
+
+    if(!success){
+      console.error('Error al actualizar el objetivo remoto', error || updated);
+      showToast('No pudimos actualizar el objetivo. Probá de nuevo en un momento.');
+      return; // g.acciones y g.progreso NO se tocan
+    }
+
+    g.acciones = updated.acciones;
+    g.progreso = updated.progreso;
+    // Supabase es la fuente de persistencia de goals — no se llama a save('goals').
+    renderGoals();
+  }catch(e){
+    console.error('Error inesperado al actualizar el objetivo remoto', e);
+    showToast('No pudimos actualizar el objetivo. Probá de nuevo en un momento.');
+  }finally{
+    goalsInFlight.delete(goalId);
+  }
 }
 function renderGoals(){
   const list = document.getElementById('goalsList');
