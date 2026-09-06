@@ -1,5 +1,5 @@
 Prueba la IA directamente en tus aplicaciones favoritas … Usa Gemini para generar borradores y pulir contenido, y disfruta de Gemini Pro con acceso a la IA de nueva generación de Google por 19,99 US$ 9,99 US$ durante 2 meses
-FELRO Daily Spark(30)
+FELRO Daily Spark(35)
 100 %
 <!DOCTYPE html>
 <html lang="es">
@@ -2125,7 +2125,40 @@ async function submitHabit(){
   }
 }
 function deleteHabitConfirm(){ const id=document.getElementById('habitId').value; if(id) askConfirm('Eliminar hábito','¿Confirmás que querés eliminar este hábito y su historial?', ()=>deleteHabit(id)); }
-async function deleteHabit(id){ db.habits=db.habits.filter(h=>h.id!==id); await save('habits'); closeModal('habitOverlay'); renderHabits(); renderHome(); showToast('Hábito eliminado'); }
+async function deleteHabit(id){
+  if(habitsInFlight.has(id)) return; // ya hay una operación de este hábito en curso (toggle o delete)
+  if(!supabaseClient || !currentSession){ showToast('No hay sesión activa — no se pudo eliminar el hábito.'); return; }
+
+  habitsInFlight.add(id);
+  try{
+    const { data: deleted, error } = await supabaseClient
+      .from('habits')
+      .delete()
+      .eq('id', id)
+      .select()
+      .single();
+
+    // Mismo criterio estricto que las demás operaciones: error===null, fila
+    // devuelta (confirma que realmente se borró algo), con id, y user_id
+    // coincidente con la sesión actual.
+    const success = !error && deleted && deleted.id && deleted.user_id === currentSession.user.id;
+
+    if(!success){
+      console.error('Error al eliminar el hábito remoto', error || deleted);
+      showToast('No pudimos eliminar el hábito. Probá de nuevo en un momento.');
+      return; // db.habits NO se toca — el hábito sigue existiendo, en pantalla y en Supabase
+    }
+
+    db.habits=db.habits.filter(h=>h.id!==id);
+    await save('habits'); // respaldo local, solo después del éxito confirmado
+    closeModal('habitOverlay'); renderHabits(); renderHome(); showToast('Hábito eliminado');
+  }catch(e){
+    console.error('Error inesperado al eliminar el hábito remoto', e);
+    showToast('No pudimos eliminar el hábito. Probá de nuevo en un momento.');
+  }finally{
+    habitsInFlight.delete(id);
+  }
+}
 async function toggleHabit(id){
   const h=db.habits.find(x=>x.id===id); if(!h) return;
   const iso=todayISO();
