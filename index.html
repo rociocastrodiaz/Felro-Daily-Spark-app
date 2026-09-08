@@ -1,5 +1,5 @@
 Prueba la IA directamente en tus aplicaciones favoritas … Usa Gemini para generar borradores y pulir contenido, y disfruta de Gemini Pro con acceso a la IA de nueva generación de Google por 19,99 US$ 9,99 US$ durante 2 meses
-FELRO Daily Spark(39)
+FELRO Daily Spark(40)
 100 %
 <!DOCTYPE html>
 <html lang="es">
@@ -1511,6 +1511,51 @@ async function syncRemoteGoals(){
 }
 let goalsInFlight = new Set(); // evita operaciones duplicadas/simultáneas sobre el mismo goal (propio, separado de tasksInFlight/habitsInFlight)
 
+/* ======================= RECUPERACIÓN DE SESIÓN =======================
+   Corrige el caso donde una caída de Internet deja el token en mal estado:
+   antes se caía silenciosamente a "landing" o quedaba todo fallando hasta
+   un logout manual. Ahora, antes de sincronizar los dominios, se valida la
+   sesión contra el servidor y, si hace falta, se intenta renovar. Nunca
+   desloguea por una simple falla de red — solo ante invalidación real. */
+
+function isRealInvalidation(error){
+  if(!error) return false;
+  const name = error.name || '';
+  const msg = (error.message || '').toLowerCase();
+  if(name === 'AuthRetryableFetchError') return false; // falla de red, no invalidación
+  if(msg.includes('fetch') || msg.includes('network') || msg.includes('failed to fetch')) return false;
+  return true; // el servidor sí respondió, y respondió que no
+}
+
+async function ensureValidSession(){
+  if(!supabaseClient || !currentSession) return currentSession;
+
+  try{
+    const { data, error } = await supabaseClient.auth.getUser();
+    if(!error && data && data.user) return currentSession; // la sesión está sana, no hace falta nada más
+  }catch(e){
+    // no se pudo ni siquiera consultar (probable falla de red) — se sigue abajo con el intento de refresh
+  }
+
+  try{
+    const { data: refreshed, error: refreshError } = await supabaseClient.auth.refreshSession();
+    if(!refreshError && refreshed && refreshed.session){
+      return refreshed.session; // renovada con éxito
+    }
+    if(isRealInvalidation(refreshError)){
+      console.error('Sesión inválida, cerrando sesión', refreshError);
+      await signOut();
+      return null;
+    }
+    // Falla de red al intentar renovar: no desloguear, seguir con la sesión que había.
+    console.error('No se pudo renovar la sesión (probable falla de red)', refreshError);
+    return currentSession;
+  }catch(e){
+    console.error('Error inesperado al renovar la sesión', e);
+    return currentSession; // falla de red/inesperada: no desloguear
+  }
+}
+
 /* ======================= BOOT / ROUTER ======================= */
 async function continueAppFlow(){
   // Cuerpo original de "boot()" (Paso 2), sin cambios en su orden ni su
@@ -1518,6 +1563,8 @@ async function continueAppFlow(){
   // pantalla, para que la decisión use los datos ya sincronizados.
   applyTheme(db.settings.theme, false);
   buildStaticChips();
+  currentSession = await ensureValidSession();
+  if(!currentSession) return; // signOut() ya se encargó de recargar la página si hacía falta
   await syncRemoteProfile();
   await syncRemoteTasks();
   await syncRemoteHabits();
