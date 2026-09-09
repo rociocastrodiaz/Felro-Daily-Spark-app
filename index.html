@@ -1,5 +1,5 @@
 Prueba la IA directamente en tus aplicaciones favoritas … Usa Gemini para generar borradores y pulir contenido, y disfruta de Gemini Pro con acceso a la IA de nueva generación de Google por 19,99 US$ 9,99 US$ durante 2 meses
-FELRO Daily Spark(40)
+FELRO Daily Spark(40.1)
 100 %
 <!DOCTYPE html>
 <html lang="es">
@@ -786,7 +786,7 @@ p{margin:0;}
     <div class="field"><label>Fecha objetivo</label><input type="date" id="fMoneyDate"></div>
     <div class="sheet-actions">
       <button class="btn-ghost" onclick="closeModal('moneyOverlay')">Cancelar</button>
-      <button class="btn-primary" onclick="submitMoneyGoal()">Guardar</button>
+      <button class="btn-primary" id="moneyGoalSubmitBtn" onclick="submitMoneyGoal()">Guardar</button>
     </div>
   </div>
 </div>
@@ -1511,6 +1511,47 @@ async function syncRemoteGoals(){
 }
 let goalsInFlight = new Set(); // evita operaciones duplicadas/simultáneas sobre el mismo goal (propio, separado de tasksInFlight/habitsInFlight)
 
+/* ======================= MONEY GOAL SYNC (READ) =======================
+   Es una sola fila por usuaria (o ninguna), identificada por user_id como
+   clave primaria — no una lista. Si no existe fila remota, no es un error:
+   db.moneyGoal queda explícitamente en null, mismo estado que renderMoneyCard()
+   ya contempla desde antes. No se toca ningún otro dominio ni window.storage
+   de otros dominios. */
+
+function mapRemoteMoneyGoalToLocal(remote){
+  return {
+    objetivo: remote.objetivo,
+    actual: remote.actual,
+    fechaObjetivo: remote.fecha_objetivo || '',
+  };
+}
+
+async function loadRemoteMoneyGoal(userId){
+  if(!supabaseClient) return { ok:false, value:null };
+  try{
+    const { data, error } = await supabaseClient
+      .from('money_goals')
+      .select('*')
+      .eq('user_id', userId)
+      .maybeSingle(); // null sin error si todavía no existe fila — no es un error
+    if(error){ console.error('Error al leer el objetivo económico remoto', error); return { ok:false, value:null }; }
+    return { ok:true, value:data }; // data puede ser null (no existe todavía) — es válido
+  }catch(e){
+    console.error('Error inesperado al leer el objetivo económico remoto', e);
+    return { ok:false, value:null };
+  }
+}
+
+async function syncRemoteMoneyGoal(){
+  if(!supabaseClient || !currentSession) return; // sin sesión, no se toca nada remoto
+  const result = await loadRemoteMoneyGoal(currentSession.user.id);
+  if(result.ok){
+    db.moneyGoal = result.value ? mapRemoteMoneyGoalToLocal(result.value) : null;
+  }
+  // Si result.ok es false (error real de red/RLS), db.moneyGoal queda tal como
+  // lo dejó window.storage — fallback seguro, mismo criterio que los demás dominios.
+}
+
 /* ======================= RECUPERACIÓN DE SESIÓN =======================
    Corrige el caso donde una caída de Internet deja el token en mal estado:
    antes se caía silenciosamente a "landing" o quedaba todo fallando hasta
@@ -1569,6 +1610,7 @@ async function continueAppFlow(){
   await syncRemoteTasks();
   await syncRemoteHabits();
   await syncRemoteGoals();
+  await syncRemoteMoneyGoal();
   if(db.profile.onboarded){
     switchScreen('home');
   } else {
@@ -2519,9 +2561,43 @@ async function submitMoneyGoal(){
   const actual=Number(document.getElementById('fMoneyCurrent').value)||0;
   const fechaObjetivo=document.getElementById('fMoneyDate').value;
   if(!objetivo || !fechaObjetivo){ showToast('Completá el objetivo y la fecha'); return; }
-  db.moneyGoal = {objetivo, actual, fechaObjetivo};
-  await save('moneyGoal'); closeModal('moneyOverlay'); renderGoals();
-  showToast('Objetivo económico guardado');
+
+  if(!supabaseClient || !currentSession){
+    showToast('No hay sesión activa — no se pudo guardar el objetivo económico.');
+    return;
+  }
+  const moneyBtn = document.getElementById('moneyGoalSubmitBtn');
+  moneyBtn.disabled = true;
+  try{
+    const { data: saved, error } = await supabaseClient
+      .from('money_goals')
+      .upsert({
+        user_id: currentSession.user.id,
+        objetivo: objetivo,
+        actual: actual,
+        fecha_objetivo: fechaObjetivo,
+      }, { onConflict: 'user_id' })
+      .select()
+      .single();
+
+    const success = !error && saved && saved.user_id === currentSession.user.id;
+
+    if(!success){
+      console.error('Error al guardar el objetivo económico remoto', error || saved);
+      showToast('No pudimos guardar el objetivo económico. Probá de nuevo en un momento.');
+      return; // db.moneyGoal NO se toca
+    }
+
+    db.moneyGoal = mapRemoteMoneyGoalToLocal(saved);
+    // Supabase es la fuente de persistencia — no se llama a save('moneyGoal').
+    closeModal('moneyOverlay'); renderGoals();
+    showToast('Objetivo económico guardado');
+  }catch(e){
+    console.error('Error inesperado al guardar el objetivo económico remoto', e);
+    showToast('No pudimos guardar el objetivo económico. Probá de nuevo en un momento.');
+  }finally{
+    moneyBtn.disabled = false;
+  }
 }
 function renderMoneyCard(){
   const body = document.getElementById('moneyCardBody');
