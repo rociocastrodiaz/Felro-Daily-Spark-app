@@ -1,5 +1,5 @@
 Prueba la IA directamente en tus aplicaciones favoritas … Usa Gemini para generar borradores y pulir contenido, y disfruta de Gemini Pro con acceso a la IA de nueva generación de Google por 19,99 US$ 9,99 US$ durante 2 meses
-FELRO Daily Spark(40.1)
+FELRO Daily Spark(50)
 100 %
 <!DOCTYPE html>
 <html lang="es">
@@ -809,7 +809,7 @@ p{margin:0;}
     <div class="field"><label>Próxima acción</label><input type="text" id="fClientNext" placeholder="Ej: Enviar propuesta" maxlength="80"></div>
     <div class="sheet-actions">
       <button class="btn-ghost" onclick="closeModal('clientOverlay')">Cancelar</button>
-      <button class="btn-primary" onclick="submitClient()">Guardar</button>
+      <button class="btn-primary" id="clientSubmitBtn" onclick="submitClient()">Guardar</button>
     </div>
     <button class="btn-danger btn-full" id="deleteClientBtn" style="display:none; margin-top:8px;" onclick="deleteClientConfirm()">Eliminar cliente</button>
   </div>
@@ -1552,6 +1552,51 @@ async function syncRemoteMoneyGoal(){
   // lo dejó window.storage — fallback seguro, mismo criterio que los demás dominios.
 }
 
+/* ======================= CLIENTS SYNC (READ) =======================
+   Mismo patrón que tasks/habits/goals. No toca convertPlanToTasks() ni
+   ningún otro dominio. window.storage sigue siendo el valor de arranque
+   por defecto de db.clients; esta sección solo lo reemplaza DESPUÉS, si
+   hay sesión — nunca lo pisa con [] si la lectura remota falla. */
+
+function mapRemoteClientToLocal(remote){
+  return {
+    id: remote.id,
+    nombre: remote.nombre,
+    negocio: remote.negocio || '',
+    estado: remote.estado,
+    ultimoContacto: remote.ultimo_contacto || '', // null remoto → '' local, compatible con <input type="date">
+    proximaAccion: remote.proxima_accion || '',
+    valorPotencial: remote.valor_potencial,
+    creadoEn: remote.created_at,
+  };
+}
+
+async function loadRemoteClients(userId){
+  if(!supabaseClient) return null;
+  try{
+    const { data, error } = await supabaseClient
+      .from('clients')
+      .select('*')
+      .eq('user_id', userId);
+    if(error){ console.error('Error al leer los clientes remotos', error); return null; }
+    return data;
+  }catch(e){
+    console.error('Error inesperado al leer los clientes remotos', e);
+    return null;
+  }
+}
+
+async function syncRemoteClients(){
+  if(!supabaseClient || !currentSession) return; // sin sesión, no se toca nada remoto
+  const remoteRows = await loadRemoteClients(currentSession.user.id);
+  if(remoteRows){
+    db.clients = remoteRows.map(mapRemoteClientToLocal);
+  }
+  // Si remoteRows es null (error), db.clients queda tal como lo dejó window.storage —
+  // NUNCA se reemplaza por [] en caso de error, mismo criterio que los demás dominios.
+}
+let clientsInFlight = new Set(); // guard exclusivo para deleteClient() — crear/editar ya se protegen con el botón deshabilitado
+
 /* ======================= RECUPERACIÓN DE SESIÓN =======================
    Corrige el caso donde una caída de Internet deja el token en mal estado:
    antes se caía silenciosamente a "landing" o quedaba todo fallando hasta
@@ -1611,6 +1656,7 @@ async function continueAppFlow(){
   await syncRemoteHabits();
   await syncRemoteGoals();
   await syncRemoteMoneyGoal();
+  await syncRemoteClients();
   if(db.profile.onboarded){
     switchScreen('home');
   } else {
@@ -2656,13 +2702,93 @@ async function submitClient(){
   if(!nombre){ showToast('Poné el nombre del cliente'); return; }
   const state=document.querySelector('#clientStateSelect .chip.active');
   const id=document.getElementById('clientId').value;
-  const data={nombre, negocio:document.getElementById('fClientBiz').value.trim(), estado:state?state.dataset.val:'Nuevo', ultimoContacto:document.getElementById('fClientLast').value, proximaAccion:document.getElementById('fClientNext').value.trim(), valorPotencial:Number(document.getElementById('fClientValue').value)||0};
-  if(id){ Object.assign(db.clients.find(x=>x.id===id), data); } else { db.clients.push(Object.assign({id:uid(), creadoEn:new Date().toISOString()}, data)); }
-  await save('clients'); closeModal('clientOverlay'); renderClients();
-  showToast(id?'Cliente actualizado':'Cliente agregado');
+  const data={
+    nombre,
+    negocio: document.getElementById('fClientBiz').value.trim() || null,
+    estado: state?state.dataset.val:'Nuevo',
+    ultimoContacto: document.getElementById('fClientLast').value || null, // nunca '' hacia una columna date
+    proximaAccion: document.getElementById('fClientNext').value.trim() || null,
+    valorPotencial: Number(document.getElementById('fClientValue').value)||0,
+  };
+
+  if(!supabaseClient || !currentSession){
+    showToast('No hay sesión activa — no se pudo guardar el cliente.');
+    return;
+  }
+  const clientBtn = document.getElementById('clientSubmitBtn');
+  clientBtn.disabled = true;
+  const remotePayload = {
+    nombre: data.nombre,
+    negocio: data.negocio,
+    estado: data.estado,
+    ultimo_contacto: data.ultimoContacto,
+    proxima_accion: data.proximaAccion,
+    valor_potencial: data.valorPotencial,
+  };
+  try{
+    let result;
+    if(id){
+      // EDIT — remoto primero, local después.
+      result = await supabaseClient.from('clients').update(remotePayload).eq('id', id).select().single();
+    } else {
+      // CREATE — sin id, lo genera Postgres (gen_random_uuid()); nunca uid() local.
+      result = await supabaseClient.from('clients').insert({ user_id: currentSession.user.id, ...remotePayload }).select().single();
+    }
+    const { data: saved, error } = result;
+    const success = !error && saved && saved.id && saved.user_id === currentSession.user.id;
+
+    if(!success){
+      console.error('Error al guardar el cliente remoto', error || saved);
+      showToast('No pudimos guardar el cliente. Probá de nuevo en un momento.');
+      return; // db.clients NO se toca — window.storage tampoco
+    }
+
+    if(id){
+      Object.assign(db.clients.find(x=>x.id===id), mapRemoteClientToLocal(saved));
+    } else {
+      db.clients.push(mapRemoteClientToLocal(saved));
+    }
+    // Supabase es la fuente de persistencia de clients — no se llama a save('clients').
+    closeModal('clientOverlay'); renderClients();
+    showToast(id?'Cliente actualizado':'Cliente agregado');
+  }catch(e){
+    console.error('Error inesperado al guardar el cliente remoto', e);
+    showToast('No pudimos guardar el cliente. Probá de nuevo en un momento.');
+  }finally{
+    clientBtn.disabled = false;
+  }
 }
 function deleteClientConfirm(){ const id=document.getElementById('clientId').value; if(id) askConfirm('Eliminar cliente','¿Confirmás que querés eliminar este cliente?', ()=>deleteClient(id)); }
-async function deleteClient(id){ db.clients=db.clients.filter(c=>c.id!==id); await save('clients'); closeModal('clientOverlay'); renderClients(); showToast('Cliente eliminado'); }
+async function deleteClient(id){
+  if(clientsInFlight.has(id)) return;
+  if(!supabaseClient || !currentSession){ showToast('No hay sesión activa — no se pudo eliminar el cliente.'); return; }
+
+  clientsInFlight.add(id);
+  try{
+    const { data: deleted, error } = await supabaseClient
+      .from('clients')
+      .delete()
+      .eq('id', id)
+      .select()
+      .single();
+    const success = !error && deleted && deleted.id && deleted.user_id === currentSession.user.id;
+
+    if(!success){
+      console.error('Error al eliminar el cliente remoto', error || deleted);
+      showToast('No pudimos eliminar el cliente. Probá de nuevo en un momento.');
+      return; // db.clients NO se toca
+    }
+
+    db.clients=db.clients.filter(c=>c.id!==id);
+    // Supabase es la fuente de persistencia de clients — no se llama a save('clients').
+    closeModal('clientOverlay'); renderClients(); showToast('Cliente eliminado');
+  }catch(e){
+    console.error('Error inesperado al eliminar el cliente remoto', e);
+    showToast('No pudimos eliminar el cliente. Probá de nuevo en un momento.');
+  }finally{
+    clientsInFlight.delete(id);
+  }
+}
 function renderClients(){
   const list=document.getElementById('clientsList');
   if(db.clients.length===0){ list.innerHTML=`<div class="empty-mini" style="margin:0 20px;">Todavía no cargaste clientes.</div>`; return; }
