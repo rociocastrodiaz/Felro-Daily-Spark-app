@@ -1,5 +1,5 @@
 Prueba la IA directamente en tus aplicaciones favoritas … Usa Gemini para generar borradores y pulir contenido, y disfruta de Gemini Pro con acceso a la IA de nueva generación de Google por 19,99 US$ 9,99 US$ durante 2 meses
-FELRO Daily Spark(50)
+FELRO Daily Spark(17sep)
 100 %
 <!DOCTYPE html>
 <html lang="es">
@@ -829,7 +829,7 @@ p{margin:0;}
     </div>
     <div class="sheet-actions">
       <button class="btn-ghost" onclick="closeModal('contentOverlay')">Cancelar</button>
-      <button class="btn-primary" onclick="submitContent()">Guardar</button>
+      <button class="btn-primary" id="contentSubmitBtn" onclick="submitContent()">Guardar</button>
     </div>
     <button class="btn-danger btn-full" id="deleteContentBtn" style="display:none; margin-top:8px;" onclick="deleteContentConfirm()">Eliminar</button>
   </div>
@@ -1597,6 +1597,49 @@ async function syncRemoteClients(){
 }
 let clientsInFlight = new Set(); // guard exclusivo para deleteClient() — crear/editar ya se protegen con el botón deshabilitado
 
+/* ======================= CONTENT ITEMS SYNC (READ) =======================
+   Mismo patrón que clients/goals/habits/tasks. "content_items" NO tiene
+   columna "created_at" en la tabla real (confirmado por consulta) — por eso
+   el mapeo no incluye "creadoEn" en ningún sentido. No toca ningún otro
+   dominio ni day_plans. window.storage sigue siendo el valor de arranque
+   por defecto de db.content; nunca se reemplaza por [] si la lectura falla. */
+
+function mapRemoteContentToLocal(remote){
+  return {
+    id: remote.id,
+    idea: remote.idea,
+    plataforma: remote.plataforma,
+    fecha: remote.fecha || '',
+    estado: remote.estado,
+  };
+}
+
+async function loadRemoteContentItems(userId){
+  if(!supabaseClient) return null;
+  try{
+    const { data, error } = await supabaseClient
+      .from('content_items')
+      .select('*')
+      .eq('user_id', userId);
+    if(error){ console.error('Error al leer el contenido remoto', error); return null; }
+    return data;
+  }catch(e){
+    console.error('Error inesperado al leer el contenido remoto', e);
+    return null;
+  }
+}
+
+async function syncRemoteContentItems(){
+  if(!supabaseClient || !currentSession) return; // sin sesión, no se toca nada remoto
+  const remoteRows = await loadRemoteContentItems(currentSession.user.id);
+  if(remoteRows){
+    db.content = remoteRows.map(mapRemoteContentToLocal);
+  }
+  // Si remoteRows es null (error), db.content queda tal como lo dejó window.storage —
+  // NUNCA se reemplaza por [] en caso de error, mismo criterio que los demás dominios.
+}
+let contentInFlight = new Set(); // guard exclusivo para deleteContentItem() — crear/editar ya se protegen con el botón deshabilitado
+
 /* ======================= RECUPERACIÓN DE SESIÓN =======================
    Corrige el caso donde una caída de Internet deja el token en mal estado:
    antes se caía silenciosamente a "landing" o quedaba todo fallando hasta
@@ -1657,6 +1700,7 @@ async function continueAppFlow(){
   await syncRemoteGoals();
   await syncRemoteMoneyGoal();
   await syncRemoteClients();
+  await syncRemoteContentItems();
   if(db.profile.onboarded){
     switchScreen('home');
   } else {
@@ -2827,12 +2871,85 @@ async function submitContent(){
   const plat=document.querySelector('#contentPlatformSelect .chip.active');
   const id=document.getElementById('contentId').value;
   const data={idea, plataforma:plat?plat.dataset.val:'instagram', fecha:document.getElementById('fContentDate').value, estado:document.getElementById('fContentState').value};
-  if(id){ Object.assign(db.content.find(x=>x.id===id), data); } else { db.content.push(Object.assign({id:uid(), creadoEn:new Date().toISOString()}, data)); }
-  await save('content'); closeModal('contentOverlay'); renderContent();
-  showToast(id?'Contenido actualizado':'Idea agregada');
+
+  if(!supabaseClient || !currentSession){
+    showToast('No hay sesión activa — no se pudo guardar el contenido.');
+    return;
+  }
+  const contentBtn = document.getElementById('contentSubmitBtn');
+  contentBtn.disabled = true;
+  // "content_items" no tiene columna created_at (confirmado en Supabase) —
+  // nunca se genera ni se envía "creadoEn"/"created_at" en este payload.
+  const remotePayload = {
+    idea: data.idea,
+    plataforma: data.plataforma,
+    fecha: data.fecha || null,
+    estado: data.estado, // siempre explícito, tal como lo eligió la usuaria — nunca se omite ni se transforma
+  };
+  try{
+    let result;
+    if(id){
+      // EDIT — remoto primero, local después. No toca user_id.
+      result = await supabaseClient.from('content_items').update(remotePayload).eq('id', id).select().single();
+    } else {
+      // CREATE — sin id, lo genera Postgres; nunca uid() local; sin creadoEn.
+      result = await supabaseClient.from('content_items').insert({ user_id: currentSession.user.id, ...remotePayload }).select().single();
+    }
+    const { data: saved, error } = result;
+    const success = !error && saved && saved.id && saved.user_id === currentSession.user.id;
+
+    if(!success){
+      console.error('Error al guardar el contenido remoto', error || saved);
+      showToast('No pudimos guardar el contenido. Probá de nuevo en un momento.');
+      return; // db.content NO se toca — window.storage tampoco
+    }
+
+    if(id){
+      Object.assign(db.content.find(x=>x.id===id), mapRemoteContentToLocal(saved));
+    } else {
+      db.content.push(mapRemoteContentToLocal(saved));
+    }
+    // Supabase es la fuente de persistencia de content_items — no se llama a save('content').
+    closeModal('contentOverlay'); renderContent();
+    showToast(id?'Contenido actualizado':'Idea agregada');
+  }catch(e){
+    console.error('Error inesperado al guardar el contenido remoto', e);
+    showToast('No pudimos guardar el contenido. Probá de nuevo en un momento.');
+  }finally{
+    contentBtn.disabled = false;
+  }
 }
 function deleteContentConfirm(){ const id=document.getElementById('contentId').value; if(id) askConfirm('Eliminar','¿Confirmás que querés eliminar esta idea de contenido?', ()=>deleteContentItem(id)); }
-async function deleteContentItem(id){ db.content=db.content.filter(c=>c.id!==id); await save('content'); closeModal('contentOverlay'); renderContent(); showToast('Eliminado'); }
+async function deleteContentItem(id){
+  if(contentInFlight.has(id)) return;
+  if(!supabaseClient || !currentSession){ showToast('No hay sesión activa — no se pudo eliminar el contenido.'); return; }
+
+  contentInFlight.add(id);
+  try{
+    const { data: deleted, error } = await supabaseClient
+      .from('content_items')
+      .delete()
+      .eq('id', id)
+      .select()
+      .single();
+    const success = !error && deleted && deleted.id && deleted.user_id === currentSession.user.id;
+
+    if(!success){
+      console.error('Error al eliminar el contenido remoto', error || deleted);
+      showToast('No pudimos eliminar el contenido. Probá de nuevo en un momento.');
+      return; // db.content NO se toca
+    }
+
+    db.content=db.content.filter(c=>c.id!==id);
+    // Supabase es la fuente de persistencia de content_items — no se llama a save('content').
+    closeModal('contentOverlay'); renderContent(); showToast('Eliminado');
+  }catch(e){
+    console.error('Error inesperado al eliminar el contenido remoto', e);
+    showToast('No pudimos eliminar el contenido. Probá de nuevo en un momento.');
+  }finally{
+    contentInFlight.delete(id);
+  }
+}
 function renderContent(){
   const strip = document.getElementById('contentWeekStrip');
   strip.innerHTML = [...Array(7)].map((_,i)=>{
