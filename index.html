@@ -1,6 +1,3 @@
-Prueba la IA directamente en tus aplicaciones favoritas … Usa Gemini para generar borradores y pulir contenido, y disfruta de Gemini Pro con acceso a la IA de nueva generación de Google por 19,99 US$ 9,99 US$ durante 2 meses
-FELRO Daily Spark(17sep)
-100 %
 <!DOCTYPE html>
 <html lang="es">
 <head>
@@ -1640,6 +1637,49 @@ async function syncRemoteContentItems(){
 }
 let contentInFlight = new Set(); // guard exclusivo para deleteContentItem() — crear/editar ya se protegen con el botón deshabilitado
 
+/* ======================= DAY PLANS SYNC (READ) =======================
+   db.dayplans es un MAPA por fecha (no un array ni un objeto único) — se
+   reconstruye completo con TODAS las fechas planificadas por la usuaria,
+   no solo la de hoy. Clave primaria compuesta (user_id, fecha), sin "id"
+   propio. No toca convertPlanToTasks() ni ningún otro dominio. Nunca se
+   reemplaza por {} si la lectura remota falla. */
+
+function mapRemoteDayPlanToLocal(remote){
+  return {
+    fecha: remote.fecha,
+    prioridad1: remote.prioridad1,
+    energia: remote.energia,
+    periods: remote.periods,
+  };
+}
+
+async function loadRemoteDayPlans(userId){
+  if(!supabaseClient) return null;
+  try{
+    const { data, error } = await supabaseClient
+      .from('day_plans')
+      .select('*')
+      .eq('user_id', userId); // sin filtrar por fecha — trae todos los planes de la usuaria
+    if(error){ console.error('Error al leer los planes del día remotos', error); return null; }
+    return data;
+  }catch(e){
+    console.error('Error inesperado al leer los planes del día remotos', e);
+    return null;
+  }
+}
+
+async function syncRemoteDayPlans(){
+  if(!supabaseClient || !currentSession) return; // sin sesión, no se toca nada remoto
+  const remoteRows = await loadRemoteDayPlans(currentSession.user.id);
+  if(remoteRows){
+    const nuevo = {};
+    remoteRows.forEach(row => { nuevo[row.fecha] = mapRemoteDayPlanToLocal(row); });
+    db.dayplans = nuevo;
+  }
+  // Si remoteRows es null (error), db.dayplans queda tal como lo dejó window.storage —
+  // NUNCA se reemplaza por {} en caso de error, mismo criterio que los demás dominios.
+}
+
 /* ======================= RECUPERACIÓN DE SESIÓN =======================
    Corrige el caso donde una caída de Internet deja el token en mal estado:
    antes se caía silenciosamente a "landing" o quedaba todo fallando hasta
@@ -1701,6 +1741,7 @@ async function continueAppFlow(){
   await syncRemoteMoneyGoal();
   await syncRemoteClients();
   await syncRemoteContentItems();
+  await syncRemoteDayPlans();
   if(db.profile.onboarded){
     switchScreen('home');
   } else {
@@ -1930,12 +1971,47 @@ function renderWizPreview(){
 }
 async function saveWizPlan(){
   const periods = generatePlan(wizData);
-  db.dayplans[todayISO()] = {fecha:todayISO(), prioridad1:wizData.prioridad1, energia:wizData.energia, periods};
-  await save('dayplans');
-  closeModal('wizOverlay');
-  showToast('¡Tu día está armado! ✨');
-  renderHome();
-  if(currentScreen==='day') renderDay();
+  const fecha = todayISO();
+
+  if(!supabaseClient || !currentSession){
+    showToast('No hay sesión activa — no se pudo guardar tu día.');
+    return;
+  }
+  const nextBtn = document.getElementById('wizNext');
+  nextBtn.disabled = true;
+  try{
+    const { data: saved, error } = await supabaseClient
+      .from('day_plans')
+      .upsert({
+        user_id: currentSession.user.id,
+        fecha: fecha,
+        prioridad1: wizData.prioridad1,
+        energia: wizData.energia,
+        periods: periods,
+      }, { onConflict: 'user_id,fecha' })
+      .select()
+      .single();
+
+    const success = !error && saved && saved.user_id === currentSession.user.id && saved.fecha === fecha;
+
+    if(!success){
+      console.error('Error al guardar el plan del día remoto', error || saved);
+      showToast('No pudimos guardar tu día. Probá de nuevo en un momento.');
+      return; // db.dayplans NO se toca — el asistente queda abierto para reintentar
+    }
+
+    db.dayplans[fecha] = mapRemoteDayPlanToLocal(saved);
+    // Supabase es la fuente de persistencia de day_plans — no se llama a save('dayplans').
+    closeModal('wizOverlay');
+    showToast('¡Tu día está armado! ✨');
+    renderHome();
+    if(currentScreen==='day') renderDay();
+  }catch(e){
+    console.error('Error inesperado al guardar el plan del día remoto', e);
+    showToast('No pudimos guardar tu día. Probá de nuevo en un momento.');
+  }finally{
+    nextBtn.disabled = false;
+  }
 }
 
 /* ======================= TASKS (Mi día) ======================= */
