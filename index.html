@@ -1,3 +1,5 @@
+FELRO Daily Spark(1oct)
+100 %
 <!DOCTYPE html>
 <html lang="es">
 <head>
@@ -2041,7 +2043,7 @@ function renderDay(){
     <div class="card dayplan-card">
       <div class="section-title" style="display:flex; justify-content:space-between; align-items:center;">
         <span>Tu día planificado ✨</span>
-        <button class="mini-btn" onclick="convertPlanToTasks('${selectedDate}')" title="Agregar como tareas">＋ tareas</button>
+        <button class="mini-btn" id="convertPlanBtn" onclick="convertPlanToTasks('${selectedDate}')" title="Agregar como tareas">＋ tareas</button>
       </div>
       ${plan.periods.map(p=>`<div class="dp-period"><div class="dp-period-label">${p.label}</div>${p.items.map(it=>`<div class="dp-item"><div class="dp-time">${it.hora}</div><div>${escapeHtml(it.texto)}</div></div>`).join('')}</div>`).join('')}
     </div>` : '';
@@ -2070,21 +2072,57 @@ function renderDay(){
 }
 async function convertPlanToTasks(fecha){
   const plan = db.dayplans[fecha]; if(!plan) return;
+  if(!supabaseClient || !currentSession){ showToast('No hay sesión activa — no se pudieron agregar las tareas.'); return; }
+
+  const nuevasFilas = [];
   plan.periods.forEach(p=>{
     p.items.forEach(it=>{
       const isPersonal = it.texto.includes('Tiempo personal') || it.texto.toLowerCase().includes('descanso') || it.texto.toLowerCase().includes('desayuno') || it.texto.toLowerCase().includes('almuerzo');
       const isPrio = it.texto.startsWith('🔥');
-      db.tasks.push({
-        id:uid(), titulo: it.texto.replace('🔥 ','').replace('🌱 ',''), descripcion:'', link:'',
-        fecha, hora: it.hora, categoria: isPersonal?'personal':'trabajo',
+      nuevasFilas.push({
+        user_id: currentSession.user.id,
+        titulo: it.texto.replace('🔥 ','').replace('🌱 ',''),
+        descripcion: '',
+        link: '',
+        fecha,
+        hora: it.hora,
+        categoria: isPersonal?'personal':'trabajo',
         prioridad: isPrio?'alta':(isPersonal?'baja':'media'),
-        completada:false, creadoEn:new Date().toISOString(),
+        completada: false,
       });
     });
   });
-  await save('tasks');
-  renderDay(); renderHome();
-  showToast('Agregado a tus tareas del día ✨');
+  if(nuevasFilas.length===0) return;
+
+  const convertBtn = document.getElementById('convertPlanBtn');
+  if(convertBtn) convertBtn.disabled = true;
+  try{
+    const { data: inserted, error } = await supabaseClient
+      .from('tasks')
+      .insert(nuevasFilas)
+      .select();
+
+    // Éxito real: error===null, se devolvió un array con exactamente la
+    // misma cantidad de filas que se intentó insertar (el INSERT en lote
+    // es atómico — si una fila fallara, Postgres no inserta ninguna).
+    const success = !error && Array.isArray(inserted) && inserted.length === nuevasFilas.length;
+
+    if(!success){
+      console.error('Error al agregar las tareas del plan a Supabase', error || inserted);
+      showToast('No pudimos agregar las tareas. Probá de nuevo en un momento.');
+      return; // db.tasks NO se toca — window.storage tampoco
+    }
+
+    db.tasks.push(...inserted.map(mapRemoteTaskToLocal));
+    await save('tasks'); // respaldo local, solo después del éxito confirmado
+    renderDay(); renderHome();
+    showToast('Agregado a tus tareas del día ✨');
+  }catch(e){
+    console.error('Error inesperado al agregar las tareas del plan a Supabase', e);
+    showToast('No pudimos agregar las tareas. Probá de nuevo en un momento.');
+  }finally{
+    if(convertBtn) convertBtn.disabled = false;
+  }
 }
 
 function pickCat(id){ document.querySelectorAll('#catSelect .chip').forEach(el=>{ const on=el.dataset.val===id; el.classList.toggle('active',on); el.style.background = on?CAT_COLOR[id]:''; el.style.borderColor = on?CAT_COLOR[id]:''; }); }
