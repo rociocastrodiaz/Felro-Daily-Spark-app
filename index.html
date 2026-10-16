@@ -1,4 +1,4 @@
-FELRO Daily Spark(1oct)
+FELRO Daily Spark(13oct)
 100 %
 <!DOCTYPE html>
 <html lang="es">
@@ -1068,7 +1068,6 @@ let storageReady = false;
 
 async function loadAll(){
   if(typeof window.storage === 'undefined'){
-    showLoadBanner('Esta copia no está corriendo dentro de Claude, así que no va a guardar datos. Abrí la app desde el link/artifact de Claude.');
     Object.keys(STORE_KEYS).forEach(k=> db[k] = defaultFor(k));
     storageReady = false;
     boot();
