@@ -1,4 +1,4 @@
-FELRO Daily Spark(13oct)
+FELRO Daily Spark
 100 %
 <!DOCTYPE html>
 <html lang="es">
@@ -902,7 +902,7 @@ p{margin:0;}
     <div class="field"><label>Objetivo principal</label><input type="text" id="fProfileGoal" maxlength="90"></div>
     <div class="sheet-actions">
       <button class="btn-ghost" onclick="closeModal('editProfileOverlay')">Cancelar</button>
-      <button class="btn-primary" onclick="submitProfile()">Guardar</button>
+      <button class="btn-primary" id="profileSubmitBtn" onclick="submitProfile()">Guardar</button>
     </div>
   </div>
 </div>
@@ -3161,11 +3161,44 @@ function openEditProfile(){
   openModalEl('editProfileOverlay');
 }
 async function submitProfile(){
-  db.profile.nombre = document.getElementById('fProfileName').value.trim();
-  db.profile.objetivoPrincipal = document.getElementById('fProfileGoal').value.trim();
-  db.profile.avatar = pickedAvatar;
-  await save('profile'); closeModal('editProfileOverlay'); renderProfile(); renderHome();
-  showToast('Perfil actualizado');
+  const nombre = document.getElementById('fProfileName').value.trim();
+  const objetivoPrincipal = document.getElementById('fProfileGoal').value.trim();
+  const avatar = pickedAvatar;
+
+  if(!supabaseClient || !currentSession){
+    showToast('No hay sesión activa — no se pudo guardar el perfil.');
+    return;
+  }
+  const profileBtn = document.getElementById('profileSubmitBtn');
+  profileBtn.disabled = true;
+  try{
+    // Remoto primero: solo nombre, objetivo_principal y avatar, sobre la fila
+    // cuyo id coincide con la sesión. db.profile no se toca hasta confirmar.
+    const { data: saved, error } = await supabaseClient
+      .from('profiles')
+      .update({ nombre: nombre, objetivo_principal: objetivoPrincipal, avatar: avatar })
+      .eq('id', currentSession.user.id)
+      .select()
+      .single();
+
+    const success = !error && saved && saved.id === currentSession.user.id;
+
+    if(!success){
+      console.error('Error al guardar el perfil remoto', error || saved);
+      showToast('No pudimos guardar el perfil. Probá de nuevo en un momento.');
+      return; // db.profile NO se toca, el modal queda abierto con lo escrito
+    }
+
+    db.profile = mapRemoteProfileToLocal(saved);
+    await save('profile'); // respaldo local, solo después del éxito confirmado
+    closeModal('editProfileOverlay'); renderProfile(); renderHome();
+    showToast('Perfil actualizado');
+  }catch(e){
+    console.error('Error inesperado al guardar el perfil remoto', e);
+    showToast('No pudimos guardar el perfil. Probá de nuevo en un momento.');
+  }finally{
+    profileBtn.disabled = false;
+  }
 }
 function renderProfile(){
   document.getElementById('profAvatar').textContent = db.profile.avatar||'✨';
